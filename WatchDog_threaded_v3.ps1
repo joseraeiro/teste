@@ -57,6 +57,12 @@ $targets = @($ProcessName | ForEach-Object {
 # the life of the script.
 $script:BonkScore = 0
 
+# Per-process mole registry: each distinct process name is given, once, a
+# stable hole (screen column) and mole face for the whole session, so
+# interleaved names stay visually distinct. Populated lazily by Show-Bonk.
+$script:MoleReg  = @{}
+$script:MoleNext = 0
+
 # --- Console helper: focus this window, then inject a real Enter ------------
 if (-not ('Conio' -as [type])) {
 Add-Type -TypeDefinition @'
@@ -207,10 +213,15 @@ function Invoke-Target {
 #  keystroke is delivered by an independent background thread scheduled inside
 #  Invoke-Target ([Conio]::SendEnterAfter), so nothing here can shift that
 #  timing. The whole body is wrapped in try/catch: if the animation ever
-#  fails it is swallowed and the watchdog keeps running. Pass the whacked
-#  process Name and PID for the scoreboard, and (optionally) the event
-#  SourceIdentifier so we can fast-forward and return promptly when another
-#  spawn is already queued.
+#  fails it is swallowed and the watchdog keeps running.
+#
+#  Each distinct process name is assigned - once, stably, for the session -
+#  its own hole (a fixed screen column) and its own mole face, so different
+#  processes are told apart by where they pop up and how they look, even when
+#  they interleave. The mole blurts ONE random line and is promptly whacked
+#  by a hammer that flips over and strikes it with its own face. Pass the
+#  whacked process Name and PID for the scoreboard, and (optionally) the
+#  event SourceIdentifier so we can fast-forward when another spawn is queued.
 # --------------------------------------------------------------------------
 function Show-Bonk {
     [CmdletBinding()]
@@ -227,6 +238,23 @@ function Show-Bonk {
     $anchorTop    = 0
     $cursorHidden = $false
 
+    # Holes (screen columns) and mole faces. A process name keeps the same
+    # slot + face for the whole session, so interleaved names stay distinct.
+    $slots      = @(8, 16, 24, 32)
+    $styleEyes  = @('  o o  ', ' -o-o- ', '  >_<  ', '  O O  ', '  u u  ', ' _=_=_ ')
+    $styleMouth = @('  \_/  ', '  ---  ', '  /~\  ', '   o   ', '  ___  ', '  \_/  ')
+
+    # Lazy, session-persistent assignment: first time we see a name it takes
+    # the next hole/face in order; every later spawn of it reuses that.
+    if ($null -eq $script:MoleReg) { $script:MoleReg = @{}; $script:MoleNext = 0 }
+    if (-not $script:MoleReg.ContainsKey($Name)) {
+        $script:MoleReg[$Name] = $script:MoleNext
+        $script:MoleNext++
+    }
+    $ord      = [int]$script:MoleReg[$Name]
+    $C        = $slots[$ord % $slots.Count]
+    $styleIdx = $ord % $styleEyes.Count
+
     try {
         # --- Fit check: if the window is too small, skip (never throw/garble).
         $w = [Console]::WindowWidth
@@ -241,13 +269,17 @@ function Show-Bonk {
         [Console]::CursorVisible = $false
         $cursorHidden = $true
 
-        # Reserve artH rows below the cursor so frame drawing never scrolls the
-        # buffer mid-animation. Writing the newlines does any scrolling now, once.
+        # Reserve artH rows so frame drawing never scrolls the buffer mid-run.
         [Console]::Write([Environment]::NewLine * $artH)
         $anchorTop = [Console]::CursorTop - $artH
         if ($anchorTop -lt 0) { $anchorTop = 0 }
 
         # ---- tiny flicker-free drawing kit (nested; reads the vars above) ----
+        function Center([string]$s, [int]$c) {
+            $lp = $c - [int][Math]::Floor($s.Length / 2)
+            if ($lp -lt 0) { $lp = 0 }
+            return (' ' * $lp) + $s
+        }
         function Merge([string]$base, [string]$over) {
             $b = $base.PadRight($artW).Substring(0, $artW).ToCharArray()
             $o = $over.PadRight($artW)
@@ -257,8 +289,14 @@ function Show-Bonk {
         function New-Base {
             $c = [string[]]::new($artH)
             for ($i = 0; $i -lt $artH; $i++) { $c[$i] = ' ' * $artW }
-            $c[12] = ('_' * 16) + (' ' * 8) + ('_' * 16)
-            $c[13] = ('#' * 16) + (' ' * 8) + ('#' * 16)
+            $g12 = ('_' * $artW).ToCharArray()
+            $g13 = ('#' * $artW).ToCharArray()
+            foreach ($s in $slots) {
+                for ($k = -2; $k -le 2; $k++) { $x = $s + $k; if ($x -ge 0 -and $x -lt $artW) { $g12[$x] = ' ' } }
+                for ($k = -1; $k -le 1; $k++) { $x = $s + $k; if ($x -ge 0 -and $x -lt $artW) { $g13[$x] = ' ' } }
+            }
+            $c[12] = -join $g12
+            $c[13] = -join $g13
             return ,$c
         }
         function Place($canvas, $lines, [int]$top) {
@@ -283,105 +321,107 @@ function Show-Bonk {
         }
         function Nap([int]$ms) { Start-Sleep -Milliseconds $ms }
 
-        # ---- sprites (single-quoted: every char is literal) ------------------
-        #  ruler ->   0123456789012345678901234567890123456789
-        $headTop = '               .------.                 '
-        $eyesC   = '              /  o  o  \                 '
-        $eyesL   = '              / o  o   \                 '
-        $eyesR   = '              /   o  o \                 '
-        $eyesX   = '              /  x  x  \                 '
-        $snout   = '              |  (..)  |                 '
-        $mouth   = '              \  \__/  /                 '
-        $mouthZ  = '              \  ~~~~  /                 '
-        $baseRow = '               \______/                 '
-
-        $moleC = @($headTop, $eyesC, $snout, $mouth,  $baseRow)
-        $moleZ = @($headTop, $eyesX, $snout, $mouthZ, $baseRow)
-        $peekC = @($headTop, $eyesC)
-        $peekL = @($headTop, $eyesL)
-        $peekR = @($headTop, $eyesR)
-
-        $hammer = @(
-            '           +==============+             ',
-            '           |    B O N K   |             ',
-            '           +==============+             ',
-            '                 ||                     ',
-            '                 ||                     '
-        )
-        $impact = @('            \    *   *    /              ')
-        $burst  = @(
-            '             \    |    /                 ',
-            '          *    \  |  /    *              ',
-            '           ---- ( >< ) ----              ',
-            '          *    /  |  \    *              ',
-            '             /    |    \                 '
-        )
-
-        # ---- speech-bubble builder (guaranteed-aligned via PadRight) ---------
+        # ---- this process's mole (centred on ITS hole $C, style $styleIdx) ---
+        function MoleLines([bool]$dizzy, [int]$shift) {
+            $e = if ($dizzy) { '  x x  ' } else { $styleEyes[$styleIdx] }
+            $m = if ($dizzy) { '  vvv  ' } else { $styleMouth[$styleIdx] }
+            $rows = @(' .-----. ', ('/' + $e + '\'), ('\' + $m + '/'), ' \_____/ ')
+            $out = @()
+            foreach ($r in $rows) { $out += (Center $r ($C + $shift)) }
+            return ,$out
+        }
+        # Speech bubble, snugly sized to the text and clamped over the mole.
         function Bubble([string]$text) {
-            $inner = 30
-            if ($text.Length -gt $inner) { $text = $text.Substring(0, $inner) }
-            $top   = '  .' + ('-' * ($inner + 2)) + '.'
-            $mid   = '  | ' + $text.PadRight($inner) + ' |'
-            $bot   = '  `' + ('-' * ($inner + 2)) + '`'
-            $tail1 = '              \                         '
-            $tail2 = '               \                        '
-            return @($top, $mid, $bot, $tail1, $tail2)
+            if ($text.Length -gt 30) { $text = $text.Substring(0, 30) }
+            $inner = $text.Length
+            $wBox  = $inner + 4
+            $left  = $C - [int]($wBox / 2)
+            if ($left + $wBox -gt $artW) { $left = $artW - $wBox }
+            if ($left -lt 0) { $left = 0 }
+            $pad = ' ' * $left
+            return @(
+                ($pad + '.' + ('-' * ($inner + 2)) + '.'),
+                ($pad + '| ' + $text + ' |'),
+                ($pad + '`' + ('-' * ($inner + 2)) + '`'),
+                (Center '\' $C)
+            )
+        }
+        # Mallet centred on $C: handle down to $headTop, then a 3-row head whose
+        # middle row is the flip texture (back -> spin -> face) that strikes.
+        function Hammer([string]$tex, [int]$headTop) {
+            $core = @()
+            for ($r = 0; $r -lt $headTop; $r++) { $core += (Center '||' $C) }
+            $core += (Center '+====+' $C)
+            $core += (Center ('|' + $tex + '|') $C)
+            $core += (Center '+====+' $C)
+            return ,$core
         }
 
+        # Precompute this mole's poses and the splat once.
+        $mUp   = MoleLines $false 0
+        $mDz   = MoleLines $true  0
+        $pkC   = $mUp[0..1]
+        $pkL   = (MoleLines $false -1)[0..1]
+        $pkR   = (MoleLines $false  1)[0..1]
+        $rise  = $mUp[0..2]
+        $star  = @((Center '\  *  /' $C))
+        $burst = @((Center '  \ | /  ' $C), (Center '-- >@< --' $C), (Center '  / | \  ' $C))
+
         # =====================================================================
-        #  BEAT 1 - PEEK: wary emergence, a glance left, a glance right.
+        #  BEAT 1 - PEEK: the mole pops from ITS hole and glances about.
         # =====================================================================
-        $f = New-Base;                     Draw $f $null; Nap 250   # empty hole
-        $f = New-Base; Place $f $peekC 10; Draw $f $null; Nap 420   # eyes up, wary
-        $f = New-Base; Place $f $peekL 10; Draw $f $null; Nap 520   # look left
-        $f = New-Base; Place $f $peekR 10; Draw $f $null; Nap 520   # look right
-        $f = New-Base; Place $f $peekC 10; Draw $f $null; Nap 260
-        $f = New-Base; Place $f $moleC  9; Draw $f $null; Nap 130   # rise...
-        $f = New-Base; Place $f $moleC  8; Draw $f $null; Nap 130
-        $f = New-Base; Place $f $moleC  7; Draw $f $null; Nap 200   # ...fully up
+        $f = New-Base;                    Draw $f $null; Nap 200   # just the holes
+        $f = New-Base; Place $f $pkC 10;  Draw $f $null; Nap 260   # eyes up
+        $f = New-Base; Place $f $pkL 10;  Draw $f $null; Nap 280   # glance left
+        $f = New-Base; Place $f $pkR 10;  Draw $f $null; Nap 280   # glance right
+        $f = New-Base; Place $f $rise 9;  Draw $f $null; Nap 130   # rise...
+        $f = New-Base; Place $f $mUp  8;  Draw $f $null; Nap 160   # ...fully up
 
         $fast = Pending
 
         # =====================================================================
-        #  BEAT 2 - EXISTENTIAL CRISIS: milked, one line at a time.
+        #  BEAT 2 - ONE LINE: a single random thought, then it's promptly done.
         # =====================================================================
-        $dialogue = @(
-            'Ah. The surface. We meet again.'
-            "I've been alive four seconds now."
-            'Statistically, I am a process.'
-            'Something up here knows my PID.'
-            'It has a hammer. It always does.'
-            'I am watched, therefore I am.'
-            'Another me will rise in a minute,'
-            'certain it is the very first mole.'
-            '...still. Perhaps today is diff-'
+        $quips = @(
+            'Oh good. The surface.'
+            'I am, at best, a process.'
+            'Something knows my PID.'
+            'Not this again. Honestly.'
+            'Is it all just holes?'
+            "I've made a terrible mistake."
+            'Fifty seconds. Tops.'
+            'Ah, the warm hum of RAM.'
+            'Do not watch me. ...Too late.'
+            'I exist. Briefly. Loudly.'
+            'My whole purpose is this.'
+            'Tell my child procs I tried.'
+            'Statistically, this ends now.'
+            'I peaked at boot.'
+            'Here we go. Again. Forever.'
+            'I regret every fork.'
         )
-        foreach ($line in $dialogue) {
-            if (-not $fast -and (Pending)) { $fast = $true }
-            $f = New-Base
-            Place $f (Bubble $line) 0
-            Place $f $moleC 7
-            Draw $f $null
-            if ($fast) { Nap 140; break } else { Nap 900 }
-        }
+        $say = Get-Random -InputObject $quips
+        $f = New-Base; Place $f (Bubble $say) 4; Place $f $mUp 8; Draw $f $null
+        if ($fast) { Nap 550 } else { Nap 1500 }
 
         # =====================================================================
-        #  BEAT 3 - WIND-UP: the hammer rises over three frames, ominously.
+        #  BEAT 3 - WIND-UP + FLIP: the hammer rises, turns over (back -> spin
+        #  -> face) so it comes down face-first.
         # =====================================================================
-        $wu = if ($fast) { 60 } else { 250 }
-        $f = New-Base; Place $f $moleC 7; Place $f $hammer 2; Draw $f $null; Nap $wu
-        $f = New-Base; Place $f $moleC 7; Place $f $hammer 1; Draw $f $null; Nap $wu
-        $f = New-Base; Place $f $moleC 7; Place $f $hammer 0; Draw $f $null; Nap ($wu + 150)
+        $wu = if ($fast) { 60 } else { 200 }
+        $f = New-Base; Place $f $mUp 8; Place $f (Hammer '####' 2) 0; Draw $f $null; Nap $wu   # back, raised
+        $f = New-Base; Place $f $mUp 8; Place $f (Hammer '////' 3) 0; Draw $f $null; Nap $wu   # flipping
+        $f = New-Base; Place $f $mUp 8; Place $f (Hammer '\\\\' 5) 0; Draw $f $null; Nap $wu   # flipping
+        $f = New-Base; Place $f $mUp 8; Place $f (Hammer ' oo ' 6) 0; Draw $f $null; Nap $wu   # face poised
 
         # =====================================================================
-        #  BEAT 4 - BONK: slam, impact, splat. In red.
+        #  BEAT 4 - BONK: the hammer's face strikes the mole's face. In red.
         # =====================================================================
         $script:BonkScore++
-        $f = New-Base; Place $f $moleZ 7; Place $f $hammer 5; Place $f $impact 4
-        Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 150 } else { Nap 380 }
-        $f = New-Base; Place $f $burst 7
+        $f = New-Base; Place $f $mDz 8; Place $f (Hammer '>vv<' 8) 0; Place $f $star 7
         Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 160 } else { Nap 430 }
+        $f = New-Base; Place $f $burst 8
+        Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 160 } else { Nap 400 }
 
         # =====================================================================
         #  BEAT 5 - SCORE: session-persistent counter + the named victim.
@@ -394,7 +434,7 @@ function Show-Bonk {
             ('   |' + ("  PID     : " + [string]$TargetPid).PadRight(30).Substring(0, 30) + '|'),
             ('   +' + ('=' * 30) + '+')
         )
-        $f = New-Base; Place $f $burst 7; Place $f $score 0
+        $f = New-Base; Place $f $burst 8; Place $f $score 0
         Draw $f ([ConsoleColor]::Yellow); if ($fast) { Nap 500 } else { Nap 1500 }
     }
     catch {
