@@ -219,8 +219,8 @@ function Invoke-Target {
 #  its own hole (a fixed screen column) and its own mole face, so different
 #  processes are told apart by where they pop up and how they look, even when
 #  they interleave. The mole blurts ONE random line and is promptly whacked
-#  by a hammer that starts face-up and rotates a quarter-turn as it falls,
-#  ending face-left or face-right (random) at the moment of impact. Pass the
+#  by a sideways hammer - facing left or right, chosen at random - that
+#  swings down and clobbers it. Pass the
 #  whacked process Name and PID for the scoreboard, and (optionally) the
 #  event SourceIdentifier so we can fast-forward when another spawn is queued.
 # --------------------------------------------------------------------------
@@ -320,6 +320,16 @@ function Show-Bonk {
                 $canvas[$r] = -join $row
             }
         }
+        # The sideways mallet the whole swing uses - facing left (handle to the
+        # right) or right (handle to the left), always the same clean look.
+        # $top sets how high it sits, so the same sprite rises and then falls.
+        function PutHammer($canvas, [int]$dir, [int]$top) {
+            if ($dir -lt 0) {
+                Put $canvas @('  .----.', '(o  o |======', "  '----'") ($C - 4) $top
+            } else {
+                Put $canvas @('      .----.', '======| o  o)', "      '----'") ($C - 8) $top
+            }
+        }
         function Draw($frame, $color) {
             if ($null -ne $color) { [Console]::ForegroundColor = $color }
             for ($i = 0; $i -lt $artH; $i++) {
@@ -409,48 +419,20 @@ function Show-Bonk {
         if ($fast) { Nap 550 } else { Nap 1500 }
 
         # =====================================================================
-        #  BEAT 3 - WIND-UP + ROTATE: the hammer starts face-up, then rotates a
-        #  quarter-turn as it falls, ending face-left or face-right (random).
+        #  BEAT 3 - WIND-UP: a sideways hammer (facing left or right, chosen at
+        #  random) rises over the mole, then swings down.
         # =====================================================================
         $dir = Get-Random -InputObject @(-1, 1)
-        $wu  = if ($fast) { 70 } else { 220 }
-
-        # face UP, raised high above the mole
-        $f = New-Base; Place $f $mUp 8
-        Put $f @(' (o o) ', '|=====|', '|=====|', '  ||  ', '  ||  ') ($C - 3) 0
-        Draw $f $null; Nap $wu
-
-        # a quarter of the way over, tilting (eyes lead, handle trails)
-        $f = New-Base; Place $f $mUp 8
-        if ($dir -lt 0) {
-            Put $f @('(o o', ' \===\', '  \===\', '   \\') ($C - 3) 3
-        } else {
-            Put $f @('   o o)', '  /===/', ' /===/', '  //') ($C - 3) 3
-        }
-        Draw $f $null; Nap $wu
-
-        # face fully to the side now, poised just above the mole
-        $f = New-Base; Place $f $mUp 8
-        if ($dir -lt 0) {
-            Put $f @('  .----.', '(o  o |======', "  '----'") ($C - 4) 5
-        } else {
-            Put $f @('      .----.', '======| o  o)', "      '----'") ($C - 8) 5
-        }
-        Draw $f $null; Nap $wu
+        $wu  = if ($fast) { 70 } else { 230 }
+        $f = New-Base; Place $f $mUp 8; PutHammer $f $dir 1; Draw $f $null; Nap $wu               # raised, held
+        $f = New-Base; Place $f $mUp 8; PutHammer $f $dir 4; Draw $f $null; Nap ([int]($wu / 2))  # dropping
 
         # =====================================================================
-        #  BEAT 4 - WHACK: the sideways face strikes the mole. In red.
+        #  BEAT 4 - WHACK: the hammer slams onto the mole. In red.
         # =====================================================================
         $script:BonkScore++
-        $f = New-Base; Place $f $mDz[1..3] 9
-        if ($dir -lt 0) {
-            Put $f @('  .----.', '(o  o |===', "  '----'") ($C - 4) 6
-        } else {
-            Put $f @('   .----.', '===| o  o)', "   '----'") ($C - 6) 6
-        }
-        Put $f @('\  !  /') ($C - 3) 5
-        Put $f @('*') ($C - 6) 7
-        Put $f @('*') ($C + 6) 7
+        $f = New-Base; Place $f $mDz[1..3] 9; PutHammer $f $dir 6
+        Put $f @('*  \ ! /  *') ($C - 5) 5
         Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 170 } else { Nap 450 }
         $f = New-Base; Place $f $burst 8
         Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 160 } else { Nap 400 }
