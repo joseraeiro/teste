@@ -219,7 +219,8 @@ function Invoke-Target {
 #  its own hole (a fixed screen column) and its own mole face, so different
 #  processes are told apart by where they pop up and how they look, even when
 #  they interleave. The mole blurts ONE random line and is promptly whacked
-#  by a hammer that flips over and strikes it with its own face. Pass the
+#  by a hammer whose head starts facing up and turns - keeping the exact
+#  same look - until it faces left or right (random), then whacks. Pass the
 #  whacked process Name and PID for the scoreboard, and (optionally) the
 #  event SourceIdentifier so we can fast-forward when another spawn is queued.
 # --------------------------------------------------------------------------
@@ -305,6 +306,32 @@ function Show-Bonk {
                 if ($r -ge 0 -and $r -lt $artH) { $canvas[$r] = Merge $canvas[$r] $lines[$i] }
             }
         }
+        # Stamp a left-anchored sprite at (left,top); spaces are transparent.
+        function Put($canvas, $sprite, [int]$left, [int]$top) {
+            for ($i = 0; $i -lt $sprite.Count; $i++) {
+                $r = $top + $i
+                if ($r -lt 0 -or $r -ge $artH) { continue }
+                $row = $canvas[$r].PadRight($artW).Substring(0, $artW).ToCharArray()
+                $s = [string]$sprite[$i]
+                for ($j = 0; $j -lt $s.Length; $j++) {
+                    $x = $left + $j
+                    if ($x -ge 0 -and $x -lt $artW -and $s[$j] -ne ' ') { $row[$x] = $s[$j] }
+                }
+                $canvas[$r] = -join $row
+            }
+        }
+        # The mallet head - drawn identically in every frame, whichever way the
+        # hammer is facing; only the handle (cable) moves. $top sets its height.
+        function PutHead($canvas, [int]$top) {
+            Put $canvas @('.------.', '( o  o )', "'------'") ($C - 4) $top
+        }
+        # The horizontal handle once the head has turned to the side: to the
+        # right of the head when facing left, to its left when facing right.
+        # It only ever sits on the head's middle row, and never grows.
+        function PutCable($canvas, [int]$dir, [int]$top) {
+            if ($dir -lt 0) { Put $canvas @('======') ($C + 4) $top }
+            else            { Put $canvas @('======') ($C - 10) $top }
+        }
         function Draw($frame, $color) {
             if ($null -ne $color) { [Console]::ForegroundColor = $color }
             for ($i = 0; $i -lt $artH; $i++) {
@@ -346,16 +373,6 @@ function Show-Bonk {
                 (Center '\' $C)
             )
         }
-        # Mallet centred on $C: handle down to $headTop, then a 3-row head whose
-        # middle row is the flip texture (back -> spin -> face) that strikes.
-        function Hammer([string]$tex, [int]$headTop) {
-            $core = @()
-            for ($r = 0; $r -lt $headTop; $r++) { $core += (Center '||' $C) }
-            $core += (Center '+====+' $C)
-            $core += (Center ('|' + $tex + '|') $C)
-            $core += (Center '+====+' $C)
-            return ,$core
-        }
 
         # Precompute this mole's poses and the splat once.
         $mUp   = MoleLines $false 0
@@ -364,7 +381,6 @@ function Show-Bonk {
         $pkL   = (MoleLines $false -1)[0..1]
         $pkR   = (MoleLines $false  1)[0..1]
         $rise  = $mUp[0..2]
-        $star  = @((Center '\  *  /' $C))
         $burst = @((Center '  \ | /  ' $C), (Center '-- >@< --' $C), (Center '  / | \  ' $C))
 
         # =====================================================================
@@ -405,21 +421,33 @@ function Show-Bonk {
         if ($fast) { Nap 550 } else { Nap 1500 }
 
         # =====================================================================
-        #  BEAT 3 - WIND-UP + FLIP: the hammer rises, turns over (back -> spin
-        #  -> face) so it comes down face-first.
+        #  BEAT 3 - WIND-UP + ROTATE: the head starts facing up (handle down),
+        #  then the handle swings round - the head keeps the exact same look -
+        #  until the hammer faces left or right (random), poised to strike.
         # =====================================================================
-        $wu = if ($fast) { 60 } else { 200 }
-        $f = New-Base; Place $f $mUp 8; Place $f (Hammer '####' 2) 0; Draw $f $null; Nap $wu   # back, raised
-        $f = New-Base; Place $f $mUp 8; Place $f (Hammer '////' 3) 0; Draw $f $null; Nap $wu   # flipping
-        $f = New-Base; Place $f $mUp 8; Place $f (Hammer '\\\\' 5) 0; Draw $f $null; Nap $wu   # flipping
-        $f = New-Base; Place $f $mUp 8; Place $f (Hammer ' oo ' 6) 0; Draw $f $null; Nap $wu   # face poised
+        $dir = Get-Random -InputObject @(-1, 1)
+        $wu  = if ($fast) { 70 } else { 220 }
+
+        # facing up: handle straight down
+        $f = New-Base; Place $f $mUp 8; PutHead $f 1; Put $f @('||', '||') ($C - 1) 4
+        Draw $f $null; Nap $wu
+
+        # rotating: the handle swings out diagonally (head unchanged)
+        $f = New-Base; Place $f $mUp 8; PutHead $f 3
+        if ($dir -lt 0) { Put $f @('\', ' \') ($C + 3) 6 } else { Put $f @(' /', '/') ($C - 4) 6 }
+        Draw $f $null; Nap $wu
+
+        # facing to the side now: handle horizontal, poised above the mole
+        $f = New-Base; Place $f $mUp 8; PutHead $f 4; PutCable $f $dir 5
+        Draw $f $null; Nap $wu
 
         # =====================================================================
-        #  BEAT 4 - BONK: the hammer's face strikes the mole's face. In red.
+        #  BEAT 4 - WHACK: the head slams onto the mole. In red.
         # =====================================================================
         $script:BonkScore++
-        $f = New-Base; Place $f $mDz 8; Place $f (Hammer '>vv<' 8) 0; Place $f $star 7
-        Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 160 } else { Nap 430 }
+        $f = New-Base; Place $f $mDz[1..3] 9; PutHead $f 6; PutCable $f $dir 7
+        Put $f @('*  \ ! /  *') ($C - 5) 5
+        Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 170 } else { Nap 450 }
         $f = New-Base; Place $f $burst 8
         Draw $f ([ConsoleColor]::Red); if ($fast) { Nap 160 } else { Nap 400 }
 
